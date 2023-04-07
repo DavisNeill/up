@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Score</title>
+  </head>
+  <body>
+    <h1>Your score is: {{ student_score }}%</h1>
+    {% if student_score >= 0.7 %}
+      <p>Congratulations! You passed the quiz.</p>
+    {% else %}
+      <p>Sorry, you didn't pass the quiz. Please try again.</p>
+    {% endif %}
+    <a href="{{ url_for('index') }}">Retake the quiz</a>
+  </body>
+</html>

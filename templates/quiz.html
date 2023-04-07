@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quiz</title>
+</head>
+<body>
+    <h1>Quiz</h1>
+    <form action="/submit" method="post">
+        {% for question_index in range(questions|length) %}
+            {% set question_data = questions[question_index] %}
+            <div>
+                <p>{{ question_data.question }}</p>
+                {% for choice_index in range(question_data.choices|length) %}
+                    {% set choice = question_data.choices[choice_index] %}
+                    <input type="radio" name="{{ question_index }}" value="{{ choice_index }}" required>
+                    <label>{{ choice }}</label><br>
+                {% endfor %}
+            </div>
+        {% endfor %}
+        <button type="submit">Submit</button>
+    </form>
+</body>
+</html>
