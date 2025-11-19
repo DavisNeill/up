@@ -1,0 +1,10 @@
+# Agentic RAG System Requirements
+# Google Gemini API
+google-genai>=0.2.0
+
+# Web Framework
+Flask>=3.0.0
+werkzeug>=3.0.0
+
+# Optional dependencies for enhanced functionality
+python-dotenv>=1.0.0
