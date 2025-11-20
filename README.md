@@ -56,7 +56,10 @@ Response with Citations
 ### Prerequisites
 
 - Python 3.8 or higher
-- Google Gemini API key ([Get one here](https://ai.google.dev/))
+- **Google Gemini API key** ([Get one here](https://ai.google.dev/))
+  - **Note**: Only ONE API key needed! The system uses Google Gemini for both RAG (File Search) and Memory (embeddings)
+  - **No OpenAI API key required!** Memory uses Google's text-embedding-004 model
+- Supabase account for authentication ([Get one here](https://supabase.com))
 
 ### Setup
 
@@ -74,7 +77,10 @@ pip install -r requirements.txt
 3. Set up environment variables:
 ```bash
 cp .env.example .env
-# Edit .env and add your GEMINI_API_KEY
+# Edit .env and add:
+# - GEMINI_API_KEY (for both RAG and memory)
+# - SUPABASE_URL and SUPABASE_KEY (for authentication)
+# - SECRET_KEY (for Flask sessions)
 ```
 
 ## Usage

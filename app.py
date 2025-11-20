@@ -92,8 +92,31 @@ def init_rag_system():
         return False
 
     try:
-        rag_orchestrator = create_agentic_rag(api_key)
-        print("RAG system initialized successfully")
+        # Configure Mem0 to use Google Gemini embeddings (no OpenAI needed!)
+        memory_config = {
+            "embedder": {
+                "provider": "gemini",
+                "config": {
+                    "model": "models/text-embedding-004",
+                    "api_key": api_key
+                }
+            },
+            "vector_store": {
+                "provider": "qdrant",
+                "config": {
+                    "collection_name": "agentic_rag_memories",
+                    "embedding_model_dims": 768,
+                    "path": "./qdrant_data"  # Local storage
+                }
+            }
+        }
+
+        rag_orchestrator = create_agentic_rag(
+            api_key=api_key,
+            memory_config=memory_config,
+            enable_memory=True
+        )
+        print("RAG system initialized successfully with Google Gemini embeddings for memory")
         return True
     except Exception as e:
         print(f"Error initializing RAG system: {e}")
