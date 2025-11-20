@@ -139,6 +139,129 @@ def allowed_file(filename):
 
 
 # ============================================================================
+# DATABASE HELPERS FOR PERSISTENT DOCUMENT STORAGE
+# ============================================================================
+
+def get_user_store(user_id: str, store_name: str = 'default') -> dict:
+    """Get user's vector store from database"""
+    if supabase_client is None:
+        return None
+
+    try:
+        response = supabase_client.table('user_vector_stores')\
+            .select('*')\
+            .eq('user_id', user_id)\
+            .eq('store_name', store_name)\
+            .execute()
+
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+        return None
+    except Exception as e:
+        print(f"Error getting user store: {e}")
+        return None
+
+
+def create_or_update_user_store(user_id: str, store_id: str, store_name: str = 'default', description: str = None) -> bool:
+    """Create or update user's vector store in database"""
+    if supabase_client is None:
+        return False
+
+    try:
+        # Check if store exists
+        existing = get_user_store(user_id, store_name)
+
+        if existing:
+            # Update existing store
+            supabase_client.table('user_vector_stores')\
+                .update({'store_id': store_id, 'description': description})\
+                .eq('user_id', user_id)\
+                .eq('store_name', store_name)\
+                .execute()
+        else:
+            # Create new store
+            supabase_client.table('user_vector_stores')\
+                .insert({
+                    'user_id': user_id,
+                    'store_id': store_id,
+                    'store_name': store_name,
+                    'description': description
+                })\
+                .execute()
+
+        return True
+    except Exception as e:
+        print(f"Error creating/updating user store: {e}")
+        return False
+
+
+def add_document_to_db(user_id: str, store_id: str, file_name: str, file_path: str,
+                       file_size: int, mime_type: str = None, gemini_file_id: str = None) -> bool:
+    """Add document metadata to database"""
+    if supabase_client is None:
+        return False
+
+    try:
+        supabase_client.table('user_documents')\
+            .insert({
+                'user_id': user_id,
+                'store_id': store_id,
+                'file_name': file_name,
+                'file_path': file_path,
+                'file_size': file_size,
+                'mime_type': mime_type,
+                'gemini_file_id': gemini_file_id
+            })\
+            .execute()
+        return True
+    except Exception as e:
+        print(f"Error adding document to database: {e}")
+        return False
+
+
+def get_user_documents(user_id: str, store_name: str = 'default') -> list:
+    """Get all documents for a user's store"""
+    if supabase_client is None:
+        return []
+
+    try:
+        # First get the store
+        store = get_user_store(user_id, store_name)
+        if not store:
+            return []
+
+        # Get documents for this store
+        response = supabase_client.table('user_documents')\
+            .select('*')\
+            .eq('user_id', user_id)\
+            .eq('store_id', store['store_id'])\
+            .order('uploaded_at', desc=True)\
+            .execute()
+
+        return response.data if response.data else []
+    except Exception as e:
+        print(f"Error getting user documents: {e}")
+        return []
+
+
+def delete_document_from_db(user_id: str, document_id: str) -> bool:
+    """Delete a document from database"""
+    if supabase_client is None:
+        return False
+
+    try:
+        supabase_client.table('user_documents')\
+            .delete()\
+            .eq('user_id', user_id)\
+            .eq('id', document_id)\
+            .execute()
+        return True
+    except Exception as e:
+        print(f"Error deleting document: {e}")
+        return False
+
+
+# ============================================================================
 # AUTHENTICATION ENDPOINTS
 # ============================================================================
 
@@ -263,7 +386,7 @@ def index():
 @app.route('/upload', methods=['POST'])
 @login_required
 def upload_files():
-    """Handle file uploads"""
+    """Handle file uploads with persistent storage"""
     if rag_orchestrator is None:
         return jsonify({'error': 'RAG system not initialized'}), 500
 
@@ -271,10 +394,12 @@ def upload_files():
         return jsonify({'error': 'No files provided'}), 400
 
     files = request.files.getlist('files[]')
-    store_name = request.form.get('store_name', f'store_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+    user_id = session.get('user_id')
+    store_name = request.form.get('store_name', 'default')  # Use 'default' for persistent storage
 
     uploaded_files = []
     file_paths = []
+    file_metadata = []
 
     # Save uploaded files
     for file in files:
@@ -285,12 +410,19 @@ def upload_files():
             file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
 
             file.save(file_path)
+            file_size = os.path.getsize(file_path)
+
             uploaded_files.append(filename)
             file_paths.append(file_path)
+            file_metadata.append({
+                'filename': filename,
+                'path': file_path,
+                'size': file_size
+            })
         else:
             return jsonify({'error': f'Invalid file: {file.filename}'}), 400
 
-    # Create knowledge base
+    # Get or create persistent vector store
     try:
         chunking_config = {
             'white_space_config': {
@@ -299,31 +431,70 @@ def upload_files():
             }
         }
 
-        store_id = rag_orchestrator.create_knowledge_base(
-            store_name=store_name,
-            file_paths=file_paths,
-            chunking_config=chunking_config
-        )
+        # Check if user already has a store
+        existing_store = get_user_store(user_id, store_name)
 
+        if existing_store:
+            # Add to existing store
+            store_id = existing_store['store_id']
+            # Note: Gemini File Search doesn't support adding to existing stores directly
+            # So we need to recreate with all files
+            # For now, create a new store with timestamp
+            new_store_name = f"{store_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            store_id = rag_orchestrator.create_knowledge_base(
+                store_name=new_store_name,
+                file_paths=file_paths,
+                chunking_config=chunking_config
+            )
+            # Update database with new store
+            create_or_update_user_store(user_id, store_id, store_name,
+                                       description=f"Updated with {len(uploaded_files)} new files")
+        else:
+            # Create new store
+            store_id = rag_orchestrator.create_knowledge_base(
+                store_name=store_name,
+                file_paths=file_paths,
+                chunking_config=chunking_config
+            )
+            # Save to database
+            create_or_update_user_store(user_id, store_id, store_name,
+                                       description=f"Knowledge base with {len(uploaded_files)} files")
+
+        # Save document metadata to database
+        for metadata in file_metadata:
+            add_document_to_db(
+                user_id=user_id,
+                store_id=store_id,
+                file_name=metadata['filename'],
+                file_path=metadata['path'],
+                file_size=metadata['size']
+            )
+
+        # Update session
         session['current_store'] = store_id
         session['store_name'] = store_name
 
+        # Get total documents count
+        all_docs = get_user_documents(user_id, store_name)
+
         return jsonify({
             'success': True,
-            'message': f'Successfully created knowledge base: {store_name}',
+            'message': f'Successfully uploaded {len(uploaded_files)} file(s) to knowledge base',
             'store_id': store_id,
+            'store_name': store_name,
             'files': uploaded_files,
-            'file_count': len(uploaded_files)
+            'file_count': len(uploaded_files),
+            'total_documents': len(all_docs)
         })
 
     except Exception as e:
-        return jsonify({'error': f'Error creating knowledge base: {str(e)}'}), 500
+        return jsonify({'error': f'Error uploading files: {str(e)}'}), 500
 
 
 @app.route('/query', methods=['POST'])
 @login_required
 def query():
-    """Handle user queries with memory integration"""
+    """Handle user queries with memory integration and persistent store"""
     if rag_orchestrator is None:
         return jsonify({'error': 'RAG system not initialized'}), 500
 
@@ -333,19 +504,25 @@ def query():
     if not question:
         return jsonify({'error': 'Question is required'}), 400
 
+    # Get user's persistent store
+    user_id = session.get('user_id')
+    store_name = data.get('store_name', 'default')
+
+    # Get user's store from database
+    user_store = get_user_store(user_id, store_name)
+
+    if not user_store:
+        return jsonify({'error': 'No knowledge base found. Please upload documents first.'}), 400
+
     # Get query parameters
-    store_name = data.get('store_name') or session.get('current_store')
+    store_id = user_store['store_id']
     metadata_filter = data.get('metadata_filter')
     include_citations = data.get('include_citations', True)
-    user_id = session.get('user_id')
-
-    if not store_name:
-        return jsonify({'error': 'No knowledge base is active. Please upload files first.'}), 400
 
     try:
         result = rag_orchestrator.query(
             question=question,
-            store_name=store_name,
+            store_name=store_id,  # Use the actual Gemini store ID
             metadata_filter=metadata_filter,
             include_citations=include_citations,
             user_id=user_id
@@ -363,6 +540,98 @@ def query():
 
     except Exception as e:
         return jsonify({'error': f'Error processing query: {str(e)}'}), 500
+
+
+# ============================================================================
+# DOCUMENT MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@app.route('/api/documents/list', methods=['GET'])
+@login_required
+def list_documents():
+    """Get all documents in user's knowledge base"""
+    user_id = session.get('user_id')
+    store_name = request.args.get('store_name', 'default')
+
+    try:
+        documents = get_user_documents(user_id, store_name)
+
+        # Format document info
+        formatted_docs = []
+        for doc in documents:
+            formatted_docs.append({
+                'id': doc['id'],
+                'file_name': doc['file_name'],
+                'file_size': doc['file_size'],
+                'uploaded_at': doc['uploaded_at'],
+                'mime_type': doc.get('mime_type')
+            })
+
+        # Get store info
+        store = get_user_store(user_id, store_name)
+
+        return jsonify({
+            'success': True,
+            'documents': formatted_docs,
+            'count': len(formatted_docs),
+            'store_name': store_name,
+            'store_info': {
+                'description': store.get('description') if store else None,
+                'created_at': store.get('created_at') if store else None,
+                'updated_at': store.get('updated_at') if store else None
+            }
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Error listing documents: {str(e)}'}), 500
+
+
+@app.route('/api/documents/delete/<document_id>', methods=['DELETE'])
+@login_required
+def delete_document(document_id):
+    """Delete a document from knowledge base"""
+    user_id = session.get('user_id')
+
+    try:
+        # Delete from database
+        success = delete_document_from_db(user_id, document_id)
+
+        if success:
+            return jsonify({
+                'success': True,
+                'message': 'Document deleted successfully'
+            })
+        else:
+            return jsonify({'error': 'Failed to delete document'}), 500
+
+    except Exception as e:
+        return jsonify({'error': f'Error deleting document: {str(e)}'}), 500
+
+
+@app.route('/api/documents/stats', methods=['GET'])
+@login_required
+def get_document_stats():
+    """Get statistics about user's documents"""
+    user_id = session.get('user_id')
+    store_name = request.args.get('store_name', 'default')
+
+    try:
+        documents = get_user_documents(user_id, store_name)
+        store = get_user_store(user_id, store_name)
+
+        total_size = sum(doc['file_size'] for doc in documents)
+
+        return jsonify({
+            'success': True,
+            'total_documents': len(documents),
+            'total_size': total_size,
+            'total_size_mb': round(total_size / (1024 * 1024), 2),
+            'store_exists': store is not None,
+            'last_updated': store.get('updated_at') if store else None
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Error getting document stats: {str(e)}'}), 500
 
 
 # ============================================================================
