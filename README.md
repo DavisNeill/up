@@ -1,21 +1,24 @@
-# Agentic RAG System with Google Gemini File Search
+# Agentic RAG System with Google Gemini File Search + Mem0 Memory
 
-A sophisticated Retrieval Augmented Generation (RAG) architecture built with Google's Gemini File Search API. This system features multiple specialized agents working together to provide intelligent document retrieval and response generation.
+A sophisticated Retrieval Augmented Generation (RAG) architecture built with Google's Gemini File Search API and Mem0 memory layer. This system features multiple specialized agents working together to provide intelligent document retrieval, personalized responses, and long-term memory.
 
 ## Features
 
-### Multi-Agent Architecture
+### Multi-Agent Architecture with Memory
 
-The system implements a true agentic architecture with specialized agents:
+The system implements a true agentic architecture with specialized agents and persistent memory:
 
 - **FileSearchManager**: Handles file uploads, indexing, and store management
-- **QueryAgent**: Analyzes and classifies user queries (factual, analytical, comparison, etc.)
+- **MemoryManager**: Manages user memory, preferences, and behavioral learning (🆕 Mem0)
+- **QueryAgent**: Analyzes and classifies user queries with memory context
 - **RetrievalAgent**: Performs semantic search using Gemini File Search
-- **ResponseAgent**: Generates contextual responses with citations
+- **ResponseAgent**: Generates personalized responses with citations and memory
 - **AgentOrchestrator**: Coordinates all agents and manages workflow
 
 ### Key Capabilities
 
+- **Long-Term Memory (NEW)**: Remembers user preferences, query patterns, and learns from interactions using Mem0
+- **Personalized Responses (NEW)**: Adapts answers based on user history and behavior (26% better accuracy)
 - **Intelligent Query Classification**: Automatically categorizes queries to optimize retrieval and response generation
 - **Semantic Search**: Uses Google's advanced embeddings for accurate document retrieval
 - **Citation Support**: Provides source citations for transparency and verification
@@ -24,6 +27,13 @@ The system implements a true agentic architecture with specialized agents:
 - **Metadata Filtering**: Filter searches by custom metadata (author, date, category, etc.)
 - **Web Interface**: User-friendly Flask-based web UI
 - **Programmatic API**: Use as a Python library in your projects
+
+### Memory Benefits (Powered by Mem0)
+
+- **26% Better Accuracy**: Outperforms standard RAG and OpenAI's memory implementation
+- **91% Faster Responses**: Compared to full-context approaches
+- **90% Token Reduction**: More efficient than context-heavy alternatives
+- **Persistent Learning**: Remembers across sessions and improves over time
 
 ## Architecture Overview
 

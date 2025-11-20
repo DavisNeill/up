@@ -1,17 +1,24 @@
 """
-Agentic RAG System with Google Gemini File Search
-==================================================
+Agentic RAG System with Google Gemini File Search + Mem0 Memory Layer
+======================================================================
 
 This module implements an agentic Retrieval Augmented Generation (RAG) architecture
-using Google's Gemini File Search API. The system features multiple specialized agents
-that work together to provide intelligent document retrieval and response generation.
+using Google's Gemini File Search API with Mem0 for intelligent memory management.
+The system features multiple specialized agents that work together to provide
+intelligent document retrieval, personalized responses, and long-term memory.
 
 Architecture:
 - FileSearchManager: Manages file uploads, indexing, and store operations
-- QueryAgent: Analyzes and routes user queries
+- MemoryManager: Manages user memory, preferences, and behavioral learning (NEW)
+- QueryAgent: Analyzes and routes user queries with memory context
 - RetrievalAgent: Performs semantic search using Gemini File Search
-- ResponseAgent: Generates contextual responses
+- ResponseAgent: Generates contextual responses with memory-enhanced personalization
 - AgentOrchestrator: Coordinates all agents and manages workflow
+
+Memory Integration:
+- User Level: Long-term preferences, interests, query patterns
+- Session Level: Current conversation context and recent interactions
+- Agent Level: System behavior adaptations and learning
 """
 
 import os
@@ -29,6 +36,12 @@ except ImportError:
     print("Warning: google-genai package not installed. Install with: pip install google-genai")
     genai = None
     types = None
+
+try:
+    from mem0 import Memory
+except ImportError:
+    print("Warning: mem0ai package not installed. Install with: pip install mem0ai")
+    Memory = None
 
 
 class QueryType(Enum):
@@ -59,6 +72,187 @@ class QueryContext:
     metadata_filter: Optional[str] = None
     conversation_history: List[Dict[str, str]] = field(default_factory=list)
     retrieved_chunks: List[Dict] = field(default_factory=list)
+    user_memories: List[Dict] = field(default_factory=list)  # NEW: Retrieved memories
+
+
+class MemoryManager:
+    """
+    Manages intelligent memory using Mem0 for user preferences, behavioral patterns,
+    and contextual learning. Provides multi-level memory (user, session, agent).
+
+    Memory enables the system to:
+    - Remember user preferences and interests
+    - Learn from interaction patterns
+    - Personalize responses based on history
+    - Track domain expertise and query styles
+    """
+
+    def __init__(self, config: Optional[Dict] = None):
+        """
+        Initialize memory manager with optional configuration.
+
+        Args:
+            config: Mem0 configuration (API keys, storage backend, etc.)
+        """
+        if Memory is None:
+            raise ImportError("mem0ai package is required. Install with: pip install mem0ai")
+
+        # Initialize Mem0
+        self.memory = Memory(config=config or {})
+        self.enabled = True
+
+        print("[MemoryManager] Initialized with Mem0")
+
+    def search_memories(
+        self,
+        query: str,
+        user_id: str = "default_user",
+        limit: int = 5
+    ) -> List[Dict]:
+        """
+        Search for relevant memories based on query.
+
+        Args:
+            query: Search query
+            user_id: User identifier for personalized memory
+            limit: Maximum number of memories to retrieve
+
+        Returns:
+            List of relevant memory objects
+        """
+        if not self.enabled:
+            return []
+
+        try:
+            print(f"[MemoryManager] Searching memories for: {query[:50]}...")
+
+            results = self.memory.search(
+                query=query,
+                user_id=user_id,
+                limit=limit
+            )
+
+            memories = results if isinstance(results, list) else []
+            print(f"[MemoryManager] Found {len(memories)} relevant memories")
+
+            return memories
+
+        except Exception as e:
+            print(f"[MemoryManager] Error searching memories: {e}")
+            return []
+
+    def add_memory(
+        self,
+        content: str,
+        user_id: str = "default_user",
+        metadata: Optional[Dict] = None
+    ) -> bool:
+        """
+        Add a new memory from interaction.
+
+        Args:
+            content: Memory content (conversation, preference, pattern)
+            user_id: User identifier
+            metadata: Additional metadata (query_type, timestamp, etc.)
+
+        Returns:
+            Success status
+        """
+        if not self.enabled:
+            return False
+
+        try:
+            print(f"[MemoryManager] Adding memory for user: {user_id}")
+
+            self.memory.add(
+                messages=[{"role": "user", "content": content}],
+                user_id=user_id,
+                metadata=metadata or {}
+            )
+
+            print(f"[MemoryManager] Memory stored successfully")
+            return True
+
+        except Exception as e:
+            print(f"[MemoryManager] Error adding memory: {e}")
+            return False
+
+    def get_user_memories(
+        self,
+        user_id: str = "default_user",
+        limit: int = 10
+    ) -> List[Dict]:
+        """
+        Get all memories for a specific user.
+
+        Args:
+            user_id: User identifier
+            limit: Maximum memories to retrieve
+
+        Returns:
+            List of user memories
+        """
+        if not self.enabled:
+            return []
+
+        try:
+            memories = self.memory.get_all(user_id=user_id, limit=limit)
+            return memories if isinstance(memories, list) else []
+        except Exception as e:
+            print(f"[MemoryManager] Error retrieving user memories: {e}")
+            return []
+
+    def delete_memory(self, memory_id: str) -> bool:
+        """Delete a specific memory by ID"""
+        if not self.enabled:
+            return False
+
+        try:
+            self.memory.delete(memory_id=memory_id)
+            print(f"[MemoryManager] Deleted memory: {memory_id}")
+            return True
+        except Exception as e:
+            print(f"[MemoryManager] Error deleting memory: {e}")
+            return False
+
+    def clear_user_memories(self, user_id: str = "default_user") -> bool:
+        """Clear all memories for a specific user"""
+        if not self.enabled:
+            return False
+
+        try:
+            self.memory.delete_all(user_id=user_id)
+            print(f"[MemoryManager] Cleared all memories for user: {user_id}")
+            return True
+        except Exception as e:
+            print(f"[MemoryManager] Error clearing memories: {e}")
+            return False
+
+    def extract_memory_context(self, memories: List[Dict]) -> str:
+        """
+        Extract and format memory context for prompt injection.
+
+        Args:
+            memories: List of memory objects
+
+        Returns:
+            Formatted string for prompt context
+        """
+        if not memories:
+            return ""
+
+        context_parts = ["Relevant user context and preferences:"]
+
+        for i, memory in enumerate(memories, 1):
+            # Extract memory text (handle different response formats)
+            if isinstance(memory, dict):
+                text = memory.get('memory', memory.get('text', memory.get('content', str(memory))))
+            else:
+                text = str(memory)
+
+            context_parts.append(f"{i}. {text}")
+
+        return "\n".join(context_parts)
 
 
 class FileSearchManager:
@@ -352,24 +546,26 @@ class ResponseAgent:
         query_context: QueryContext,
         store_names: List[str],
         metadata_filter: Optional[str] = None,
-        include_citations: bool = True
+        include_citations: bool = True,
+        memory_context: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Generate a response using File Search and context.
+        Generate a response using File Search, context, and memory.
 
         Args:
             query_context: Query context with retrieved chunks
             store_names: Store names to search
             metadata_filter: Optional metadata filter
             include_citations: Whether to include citation information
+            memory_context: User memory context for personalization (NEW)
 
         Returns:
             Dictionary with response text and metadata
         """
         print(f"[ResponseAgent] Generating response...")
 
-        # Build enhanced prompt
-        prompt = self._build_response_prompt(query_context)
+        # Build enhanced prompt with memory
+        prompt = self._build_response_prompt(query_context, memory_context)
 
         # Configure file search
         file_search_config = types.FileSearch(
@@ -411,9 +607,14 @@ class ResponseAgent:
                 'error': str(e)
             }
 
-    def _build_response_prompt(self, query_context: QueryContext) -> str:
-        """Build an enhanced prompt for response generation"""
+    def _build_response_prompt(self, query_context: QueryContext, memory_context: Optional[str] = None) -> str:
+        """Build an enhanced prompt for response generation with memory"""
         prompt_parts = []
+
+        # Add memory context if available (FIRST for priority)
+        if memory_context:
+            prompt_parts.append(memory_context)
+            prompt_parts.append("")
 
         # Add conversation history if available
         if query_context.conversation_history:
@@ -457,16 +658,24 @@ class ResponseAgent:
 
 class AgentOrchestrator:
     """
-    Orchestrates all agents to process user queries end-to-end.
-    Manages workflow, agent coordination, and conversation state.
+    Orchestrates all agents to process user queries end-to-end with intelligent memory.
+    Manages workflow, agent coordination, conversation state, and long-term memory.
+
+    With Mem0 integration, the system remembers:
+    - User preferences and interests
+    - Query patterns and expertise level
+    - Conversation context across sessions
+    - Behavioral adaptations
     """
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, memory_config: Optional[Dict] = None, enable_memory: bool = True):
         """
-        Initialize the orchestrator with Gemini API key.
+        Initialize the orchestrator with Gemini API key and optional memory.
 
         Args:
             api_key: Gemini API key
+            memory_config: Optional Mem0 configuration
+            enable_memory: Whether to enable memory features (default: True)
         """
         if genai is None:
             raise ImportError("google-genai package is required. Install with: pip install google-genai")
@@ -479,8 +688,23 @@ class AgentOrchestrator:
         self.retrieval_agent = RetrievalAgent(self.client)
         self.response_agent = ResponseAgent(self.client)
 
+        # Initialize memory (optional)
+        self.memory_manager: Optional[MemoryManager] = None
+        self.memory_enabled = enable_memory
+
+        if enable_memory and Memory is not None:
+            try:
+                self.memory_manager = MemoryManager(config=memory_config)
+                print("[AgentOrchestrator] Memory layer enabled")
+            except Exception as e:
+                print(f"[AgentOrchestrator] Warning: Could not initialize memory: {e}")
+                self.memory_enabled = False
+        else:
+            print("[AgentOrchestrator] Memory layer disabled")
+
         self.conversation_history: List[Dict[str, str]] = []
         self.current_store: Optional[str] = None
+        self.current_user_id: str = "default_user"
 
         print("[AgentOrchestrator] Initialized with all agents")
 
@@ -535,21 +759,33 @@ class AgentOrchestrator:
         question: str,
         store_name: Optional[str] = None,
         metadata_filter: Optional[str] = None,
-        include_citations: bool = True
+        include_citations: bool = True,
+        user_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Process a user query through the agentic RAG pipeline.
+        Process a user query through the agentic RAG pipeline with memory integration.
+
+        Memory-Enhanced Workflow:
+        1. Retrieve relevant memories (user preferences, past interactions)
+        2. Analyze query with memory context
+        3. Generate personalized response
+        4. Store new memories from the interaction
 
         Args:
             question: User's question
             store_name: Store to search (uses current_store if None)
             metadata_filter: Optional metadata filter
             include_citations: Whether to include citations
+            user_id: User identifier for personalized memory
 
         Returns:
-            Response dictionary with answer and metadata
+            Response dictionary with answer, metadata, and memory info
         """
         print(f"\n[AgentOrchestrator] Processing query: {question[:100]}...")
+
+        # Set user ID
+        if user_id:
+            self.current_user_id = user_id
 
         # Use current store if none specified
         if store_name is None:
@@ -561,25 +797,58 @@ class AgentOrchestrator:
                 'error': 'No active store'
             }
 
-        # Step 1: Analyze query
+        # Step 1: Retrieve relevant memories (if enabled)
+        memories = []
+        memory_context = ""
+        if self.memory_enabled and self.memory_manager:
+            memories = self.memory_manager.search_memories(
+                query=question,
+                user_id=self.current_user_id,
+                limit=5
+            )
+            memory_context = self.memory_manager.extract_memory_context(memories)
+
+        # Step 2: Analyze query with memory context
         query_context = self.query_agent.analyze_query(
             question,
             self.conversation_history
         )
+        query_context.user_memories = memories
 
-        # Step 2: Generate response (retrieval happens inside)
+        # Step 3: Generate memory-enhanced response
         result = self.response_agent.generate_response(
             query_context=query_context,
             store_names=[store_name],
             metadata_filter=metadata_filter,
-            include_citations=include_citations
+            include_citations=include_citations,
+            memory_context=memory_context
         )
+
+        # Step 4: Store new memory from this interaction (if enabled)
+        if self.memory_enabled and self.memory_manager:
+            # Create memory content
+            memory_content = f"User asked: {question}\nResponse type: {result.get('query_type', 'GENERAL')}"
+
+            # Add memory with metadata
+            self.memory_manager.add_memory(
+                content=memory_content,
+                user_id=self.current_user_id,
+                metadata={
+                    'query_type': result.get('query_type', 'GENERAL'),
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'has_citations': len(result.get('citations', [])) > 0
+                }
+            )
 
         # Update conversation history
         self.conversation_history.append({'role': 'user', 'content': question})
         self.conversation_history.append({'role': 'assistant', 'content': result['text']})
 
-        print(f"[AgentOrchestrator] Query processed successfully")
+        # Add memory info to result
+        result['memories_used'] = len(memories)
+        result['memory_enabled'] = self.memory_enabled
+
+        print(f"[AgentOrchestrator] Query processed successfully with {len(memories)} memories")
         return result
 
     def clear_conversation(self):
@@ -587,26 +856,85 @@ class AgentOrchestrator:
         self.conversation_history = []
         print("[AgentOrchestrator] Conversation history cleared")
 
+    def set_user_id(self, user_id: str):
+        """Set the current user ID for memory personalization"""
+        self.current_user_id = user_id
+        print(f"[AgentOrchestrator] User ID set to: {user_id}")
+
+    def get_user_memories(self, user_id: Optional[str] = None, limit: int = 10) -> List[Dict]:
+        """Get all memories for a user"""
+        if not self.memory_enabled or not self.memory_manager:
+            return []
+
+        uid = user_id or self.current_user_id
+        return self.memory_manager.get_user_memories(user_id=uid, limit=limit)
+
+    def clear_user_memories(self, user_id: Optional[str] = None) -> bool:
+        """Clear all memories for a user"""
+        if not self.memory_enabled or not self.memory_manager:
+            return False
+
+        uid = user_id or self.current_user_id
+        return self.memory_manager.clear_user_memories(user_id=uid)
+
+    def add_user_preference(self, preference: str, user_id: Optional[str] = None) -> bool:
+        """Manually add a user preference to memory"""
+        if not self.memory_enabled or not self.memory_manager:
+            return False
+
+        uid = user_id or self.current_user_id
+        return self.memory_manager.add_memory(
+            content=f"User preference: {preference}",
+            user_id=uid,
+            metadata={'type': 'preference', 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')}
+        )
+
     def get_stats(self) -> Dict[str, Any]:
         """Get system statistics"""
-        return {
+        stats = {
             'total_stores': len(self.file_manager.stores),
             'total_documents': len(self.file_manager.documents),
             'conversation_length': len(self.conversation_history),
-            'current_store': self.current_store
+            'current_store': self.current_store,
+            'memory_enabled': self.memory_enabled,
+            'current_user_id': self.current_user_id
         }
+
+        # Add memory stats if enabled
+        if self.memory_enabled and self.memory_manager:
+            user_memories = self.get_user_memories(limit=100)
+            stats['total_memories'] = len(user_memories)
+
+        return stats
 
 
 # Convenience function for quick setup
-def create_agentic_rag(api_key: Optional[str] = None) -> AgentOrchestrator:
+def create_agentic_rag(
+    api_key: Optional[str] = None,
+    memory_config: Optional[Dict] = None,
+    enable_memory: bool = True
+) -> AgentOrchestrator:
     """
-    Create an agentic RAG system.
+    Create an agentic RAG system with memory capabilities.
 
     Args:
         api_key: Gemini API key (uses GEMINI_API_KEY env var if None)
+        memory_config: Optional Mem0 configuration
+        enable_memory: Whether to enable memory features (default: True)
 
     Returns:
-        AgentOrchestrator instance
+        AgentOrchestrator instance with memory
+
+    Example:
+        # Basic usage with default memory
+        rag = create_agentic_rag(api_key='your-key')
+
+        # With custom memory config
+        config = {'llm': {'provider': 'openai', 'config': {'model': 'gpt-4'}}}
+        rag = create_agentic_rag(api_key='your-key', memory_config=config)
+
+        # Disable memory
+        rag = create_agentic_rag(api_key='your-key', enable_memory=False)
     """
     if api_key is None:
         api_key = os.environ.get('GEMINI_API_KEY')
@@ -614,7 +942,7 @@ def create_agentic_rag(api_key: Optional[str] = None) -> AgentOrchestrator:
     if not api_key:
         raise ValueError("API key must be provided or set in GEMINI_API_KEY environment variable")
 
-    return AgentOrchestrator(api_key)
+    return AgentOrchestrator(api_key, memory_config=memory_config, enable_memory=enable_memory)
 
 
 if __name__ == "__main__":
