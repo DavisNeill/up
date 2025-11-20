@@ -838,6 +838,7 @@
         // Global state
         let currentUser = null;
         let selectedFiles = [];
+        let selectedDocuments = [];
         let queryTypeChartInstance = null;
         let activityChartInstance = null;
 
@@ -874,6 +875,25 @@
 
             if (currentUser) {
                 document.getElementById('userEmail').textContent = currentUser.email;
+
+                // Show/hide admin features
+                const isAdmin = currentUser.is_admin || currentUser.role === 'admin';
+
+                // Hide upload tab for non-admins
+                const uploadBtn = document.querySelector('.tab-btn[onclick*="upload"]');
+                if (uploadBtn) {
+                    uploadBtn.style.display = isAdmin ? 'block' : 'none';
+                }
+
+                // Show admin badge if admin
+                if (isAdmin && !document.getElementById('adminBadge')) {
+                    const userEmail = document.getElementById('userEmail');
+                    const badge = document.createElement('span');
+                    badge.id = 'adminBadge';
+                    badge.style.cssText = 'background: #4CAF50; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin-left: 10px;';
+                    badge.textContent = 'ADMIN';
+                    userEmail.parentNode.insertBefore(badge, userEmail.nextSibling);
+                }
             }
 
             updateStats();
@@ -1067,26 +1087,69 @@
 
                 const documentList = document.getElementById('documentList');
                 const docCount = document.getElementById('docCount');
+                const isAdmin = currentUser && (currentUser.is_admin || currentUser.role === 'admin');
 
                 if (data.success && data.documents && data.documents.length > 0) {
                     docCount.textContent = data.documents.length;
 
-                    documentList.innerHTML = data.documents.map(doc => {
+                    // Add bulk action buttons for admins
+                    let bulkActionsHTML = '';
+                    if (isAdmin) {
+                        bulkActionsHTML = `
+                            <div style="display: flex; gap: 10px; margin-bottom: 15px; padding: 10px; background: #f5f5f5; border-radius: 8px;">
+                                <label style="display: flex; align-items: center; gap: 8px;">
+                                    <input type="checkbox" id="selectAllDocs" onchange="toggleSelectAll(this.checked)">
+                                    <strong>Select All</strong>
+                                </label>
+                                <button class="btn btn-danger" onclick="bulkDeleteDocuments()"
+                                        style="width: auto; padding: 8px 16px; font-size: 0.9em;">
+                                    🗑️ Delete Selected (<span id="selectedCount">0</span>)
+                                </button>
+                                <button class="btn btn-secondary" onclick="bulkHideDocuments()"
+                                        style="width: auto; padding: 8px 16px; font-size: 0.9em;">
+                                    👁️‍🗨️ Hide Selected
+                                </button>
+                                <button class="btn btn-success" onclick="bulkShowDocuments()"
+                                        style="width: auto; padding: 8px 16px; font-size: 0.9em;">
+                                    👁️ Show Selected
+                                </button>
+                            </div>
+                        `;
+                    }
+
+                    documentList.innerHTML = bulkActionsHTML + data.documents.map(doc => {
                         const uploadDate = new Date(doc.uploaded_at).toLocaleDateString();
                         const fileSize = formatFileSize(doc.file_size);
+                        const isVisible = doc.is_visible !== false;
+                        const visibilityBadge = !isVisible ? '<span style="background: #ff9800; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin-left: 8px;">HIDDEN</span>' : '';
+
+                        // Admin controls
+                        let adminControls = '';
+                        if (isAdmin) {
+                            const checkboxHTML = `<input type="checkbox" class="doc-checkbox" value="${doc.id}" onchange="updateSelectedCount()" style="margin-right: 10px; width: 18px; height: 18px;">`;
+                            const visibilityBtn = isVisible ?
+                                `<button class="btn btn-secondary" onclick="hideDocument('${doc.id}')" style="width: auto; padding: 6px 12px; font-size: 0.85em;">👁️‍🗨️ Hide</button>` :
+                                `<button class="btn btn-success" onclick="showDocument('${doc.id}')" style="width: auto; padding: 6px 12px; font-size: 0.85em;">👁️ Show</button>`;
+                            const deleteBtn = `<button class="btn btn-danger" onclick="deleteDocument('${doc.id}')" style="width: auto; padding: 6px 12px; font-size: 0.85em;">🗑️ Delete</button>`;
+
+                            adminControls = `
+                                ${checkboxHTML}
+                                <div style="display: flex; gap: 8px;">
+                                    ${visibilityBtn}
+                                    ${deleteBtn}
+                                </div>
+                            `;
+                        }
 
                         return `
                             <div class="memory-item">
+                                ${adminControls}
                                 <div style="flex: 1;">
-                                    <strong>📄 ${doc.file_name}</strong>
+                                    <strong>📄 ${doc.file_name}</strong>${visibilityBadge}
                                     <div style="color: #666; font-size: 0.9em; margin-top: 4px;">
                                         ${fileSize} • Uploaded ${uploadDate}
                                     </div>
                                 </div>
-                                <button class="btn btn-danger" onclick="deleteDocument('${doc.id}')"
-                                        style="width: auto; padding: 8px 16px; font-size: 0.9em;">
-                                    🗑️ Delete
-                                </button>
                             </div>
                         `;
                     }).join('');
@@ -1094,8 +1157,27 @@
                     docCount.textContent = '0';
                     documentList.innerHTML = '<div class="empty-state"><p>No documents uploaded yet. Upload your first document above!</p></div>';
                 }
+
+                selectedDocuments = [];
+                updateSelectedCount();
             } catch (error) {
                 console.error('Error loading documents:', error);
+            }
+        }
+
+        // Document selection helpers
+        function toggleSelectAll(checked) {
+            const checkboxes = document.querySelectorAll('.doc-checkbox');
+            checkboxes.forEach(cb => cb.checked = checked);
+            updateSelectedCount();
+        }
+
+        function updateSelectedCount() {
+            const checkboxes = document.querySelectorAll('.doc-checkbox:checked');
+            selectedDocuments = Array.from(checkboxes).map(cb => cb.value);
+            const countElement = document.getElementById('selectedCount');
+            if (countElement) {
+                countElement.textContent = selectedDocuments.length;
             }
         }
 
@@ -1118,6 +1200,132 @@
                     updateStats();
                 } else {
                     showAlert('uploadAlert', data.error || 'Failed to delete document', 'error');
+                }
+            } catch (error) {
+                showAlert('uploadAlert', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        // Bulk Delete Documents
+        async function bulkDeleteDocuments() {
+            if (selectedDocuments.length === 0) {
+                showAlert('uploadAlert', 'No documents selected', 'error');
+                return;
+            }
+
+            if (!confirm(`Are you sure you want to delete ${selectedDocuments.length} document(s)?`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/documents/bulk-delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ document_ids: selectedDocuments })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showAlert('uploadAlert', data.message, 'success');
+                    loadDocuments();
+                    updateStats();
+                } else {
+                    showAlert('uploadAlert', data.error || 'Failed to delete documents', 'error');
+                }
+            } catch (error) {
+                showAlert('uploadAlert', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        // Hide Document
+        async function hideDocument(documentId) {
+            try {
+                const response = await fetch(`/api/documents/hide/${documentId}`, {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showAlert('uploadAlert', 'Document hidden successfully', 'success');
+                    loadDocuments();
+                } else {
+                    showAlert('uploadAlert', data.error || 'Failed to hide document', 'error');
+                }
+            } catch (error) {
+                showAlert('uploadAlert', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        // Show Document
+        async function showDocument(documentId) {
+            try {
+                const response = await fetch(`/api/documents/show/${documentId}`, {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showAlert('uploadAlert', 'Document is now visible', 'success');
+                    loadDocuments();
+                } else {
+                    showAlert('uploadAlert', data.error || 'Failed to show document', 'error');
+                }
+            } catch (error) {
+                showAlert('uploadAlert', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        // Bulk Hide Documents
+        async function bulkHideDocuments() {
+            if (selectedDocuments.length === 0) {
+                showAlert('uploadAlert', 'No documents selected', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/documents/bulk-hide', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ document_ids: selectedDocuments })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showAlert('uploadAlert', data.message, 'success');
+                    loadDocuments();
+                } else {
+                    showAlert('uploadAlert', data.error || 'Failed to hide documents', 'error');
+                }
+            } catch (error) {
+                showAlert('uploadAlert', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        // Bulk Show Documents
+        async function bulkShowDocuments() {
+            if (selectedDocuments.length === 0) {
+                showAlert('uploadAlert', 'No documents selected', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/documents/bulk-show', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ document_ids: selectedDocuments })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showAlert('uploadAlert', data.message, 'success');
+                    loadDocuments();
+                } else {
+                    showAlert('uploadAlert', data.error || 'Failed to show documents', 'error');
                 }
             } catch (error) {
                 showAlert('uploadAlert', 'Error: ' + error.message, 'error');

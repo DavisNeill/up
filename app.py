@@ -133,6 +133,45 @@ def login_required(f):
     return decorated_function
 
 
+def admin_required(f):
+    """Decorator to require admin role"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return jsonify({'error': 'Authentication required'}), 401
+
+        user_role = session.get('user_role', 'user')
+        if user_role != 'admin':
+            return jsonify({'error': 'Admin access required'}), 403
+
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def get_user_role(user_id: str) -> str:
+    """Get user role from database"""
+    if supabase_client is None:
+        return 'user'
+
+    try:
+        response = supabase_client.table('user_profiles')\
+            .select('role')\
+            .eq('id', user_id)\
+            .execute()
+
+        if response.data and len(response.data) > 0:
+            return response.data[0].get('role', 'user')
+        return 'user'
+    except Exception as e:
+        print(f"Error getting user role: {e}")
+        return 'user'
+
+
+def is_admin(user_id: str) -> bool:
+    """Check if user is admin"""
+    return get_user_role(user_id) == 'admin'
+
+
 def allowed_file(filename):
     """Check if file extension is allowed"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -328,6 +367,10 @@ def login():
         session['user_email'] = response.user.email
         session['access_token'] = response.session.access_token
 
+        # Get and store user role
+        user_role = get_user_role(response.user.id)
+        session['user_role'] = user_role
+
         # Set user ID in RAG system
         if rag_orchestrator:
             rag_orchestrator.set_user_id(response.user.id)
@@ -365,10 +408,20 @@ def logout():
 @login_required
 def get_current_user():
     """Get current user info"""
+    user_id = session.get('user_id')
+    user_role = session.get('user_role')
+
+    # Refresh role from database if not in session
+    if not user_role:
+        user_role = get_user_role(user_id)
+        session['user_role'] = user_role
+
     return jsonify({
         'user': {
-            'id': session.get('user_id'),
-            'email': session.get('user_email')
+            'id': user_id,
+            'email': session.get('user_email'),
+            'role': user_role,
+            'is_admin': user_role == 'admin'
         }
     })
 
@@ -384,9 +437,9 @@ def index():
 
 
 @app.route('/upload', methods=['POST'])
-@login_required
+@admin_required
 def upload_files():
-    """Handle file uploads with persistent storage"""
+    """Handle file uploads with persistent storage (Admin only)"""
     if rag_orchestrator is None:
         return jsonify({'error': 'RAG system not initialized'}), 500
 
@@ -587,9 +640,9 @@ def list_documents():
 
 
 @app.route('/api/documents/delete/<document_id>', methods=['DELETE'])
-@login_required
+@admin_required
 def delete_document(document_id):
-    """Delete a document from knowledge base"""
+    """Delete a document from knowledge base (Admin only)"""
     user_id = session.get('user_id')
 
     try:
@@ -632,6 +685,160 @@ def get_document_stats():
 
     except Exception as e:
         return jsonify({'error': f'Error getting document stats: {str(e)}'}), 500
+
+
+@app.route('/api/documents/bulk-delete', methods=['POST'])
+@admin_required
+def bulk_delete_documents():
+    """Bulk delete documents (Admin only)"""
+    if supabase_client is None:
+        return jsonify({'error': 'Database not configured'}), 500
+
+    data = request.get_json()
+    document_ids = data.get('document_ids', [])
+
+    if not document_ids:
+        return jsonify({'error': 'No document IDs provided'}), 400
+
+    user_id = session.get('user_id')
+
+    try:
+        # Call Supabase function for bulk delete
+        response = supabase_client.rpc('bulk_delete_documents', {
+            'doc_ids': document_ids,
+            'admin_id': user_id
+        }).execute()
+
+        deleted_count = response.data if response.data else 0
+
+        return jsonify({
+            'success': True,
+            'message': f'Successfully deleted {deleted_count} document(s)',
+            'deleted_count': deleted_count
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Error bulk deleting documents: {str(e)}'}), 500
+
+
+@app.route('/api/documents/hide/<document_id>', methods=['POST'])
+@admin_required
+def hide_document(document_id):
+    """Hide a document (Admin only)"""
+    if supabase_client is None:
+        return jsonify({'error': 'Database not configured'}), 500
+
+    user_id = session.get('user_id')
+
+    try:
+        response = supabase_client.rpc('hide_document', {
+            'doc_id': document_id,
+            'admin_id': user_id
+        }).execute()
+
+        if response.data:
+            return jsonify({
+                'success': True,
+                'message': 'Document hidden successfully'
+            })
+        else:
+            return jsonify({'error': 'Failed to hide document'}), 500
+
+    except Exception as e:
+        return jsonify({'error': f'Error hiding document: {str(e)}'}), 500
+
+
+@app.route('/api/documents/show/<document_id>', methods=['POST'])
+@admin_required
+def show_document(document_id):
+    """Show a hidden document (Admin only)"""
+    if supabase_client is None:
+        return jsonify({'error': 'Database not configured'}), 500
+
+    user_id = session.get('user_id')
+
+    try:
+        response = supabase_client.rpc('show_document', {
+            'doc_id': document_id,
+            'admin_id': user_id
+        }).execute()
+
+        if response.data:
+            return jsonify({
+                'success': True,
+                'message': 'Document is now visible'
+            })
+        else:
+            return jsonify({'error': 'Failed to show document'}), 500
+
+    except Exception as e:
+        return jsonify({'error': f'Error showing document: {str(e)}'}), 500
+
+
+@app.route('/api/documents/bulk-hide', methods=['POST'])
+@admin_required
+def bulk_hide_documents():
+    """Bulk hide documents (Admin only)"""
+    if supabase_client is None:
+        return jsonify({'error': 'Database not configured'}), 500
+
+    data = request.get_json()
+    document_ids = data.get('document_ids', [])
+
+    if not document_ids:
+        return jsonify({'error': 'No document IDs provided'}), 400
+
+    user_id = session.get('user_id')
+
+    try:
+        response = supabase_client.rpc('bulk_hide_documents', {
+            'doc_ids': document_ids,
+            'admin_id': user_id
+        }).execute()
+
+        updated_count = response.data if response.data else 0
+
+        return jsonify({
+            'success': True,
+            'message': f'Successfully hid {updated_count} document(s)',
+            'updated_count': updated_count
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Error bulk hiding documents: {str(e)}'}), 500
+
+
+@app.route('/api/documents/bulk-show', methods=['POST'])
+@admin_required
+def bulk_show_documents():
+    """Bulk show documents (Admin only)"""
+    if supabase_client is None:
+        return jsonify({'error': 'Database not configured'}), 500
+
+    data = request.get_json()
+    document_ids = data.get('document_ids', [])
+
+    if not document_ids:
+        return jsonify({'error': 'No document IDs provided'}), 400
+
+    user_id = session.get('user_id')
+
+    try:
+        response = supabase_client.rpc('bulk_show_documents', {
+            'doc_ids': document_ids,
+            'admin_id': user_id
+        }).execute()
+
+        updated_count = response.data if response.data else 0
+
+        return jsonify({
+            'success': True,
+            'message': f'Successfully showed {updated_count} document(s)',
+            'updated_count': updated_count
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Error bulk showing documents: {str(e)}'}), 500
 
 
 # ============================================================================
