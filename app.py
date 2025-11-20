@@ -1,22 +1,43 @@
 """
-Flask Web Interface for Agentic RAG System
-==========================================
+Flask Web Interface for Agentic RAG System with Memory & Authentication
+========================================================================
 
-Web application that provides a user-friendly interface to the agentic RAG system.
-Supports file uploads, knowledge base creation, and interactive querying.
+Full-stack application with:
+- User authentication (Supabase)
+- Session management
+- Memory management (Mem0)
+- Memory analytics
+- Memory export
+- RAG document retrieval
 """
 
 import os
 import json
-from flask import Flask, render_template, request, jsonify, session
+import io
+import csv
+from functools import wraps
+from flask import Flask, render_template, request, jsonify, session, send_file
+from flask_cors import CORS
 from werkzeug.utils import secure_filename
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+import pandas as pd
+
+try:
+    from supabase import create_client, Client
+except ImportError:
+    print("Warning: supabase package not installed")
+    create_client = None
+    Client = None
 
 from agentic_rag import create_agentic_rag, AgentOrchestrator
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+
+# Enable CORS
+CORS(app)
 
 # Configuration
 UPLOAD_FOLDER = 'uploads'
@@ -32,8 +53,33 @@ app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
 # Ensure upload directory exists
 Path(UPLOAD_FOLDER).mkdir(exist_ok=True)
 
-# Global RAG orchestrator instance
+# Global instances
 rag_orchestrator: AgentOrchestrator = None
+supabase_client: Client = None
+
+
+def init_supabase():
+    """Initialize Supabase client"""
+    global supabase_client
+
+    supabase_url = os.environ.get('SUPABASE_URL')
+    supabase_key = os.environ.get('SUPABASE_KEY')
+
+    if not supabase_url or not supabase_key:
+        print("Warning: SUPABASE_URL or SUPABASE_KEY not set. Auth will not work.")
+        return False
+
+    if create_client is None:
+        print("Warning: supabase package not installed")
+        return False
+
+    try:
+        supabase_client = create_client(supabase_url, supabase_key)
+        print("Supabase initialized successfully")
+        return True
+    except Exception as e:
+        print(f"Error initializing Supabase: {e}")
+        return False
 
 
 def init_rag_system():
@@ -54,10 +100,136 @@ def init_rag_system():
         return False
 
 
+def login_required(f):
+    """Decorator to require authentication"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return jsonify({'error': 'Authentication required'}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+
 def allowed_file(filename):
     """Check if file extension is allowed"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+
+# ============================================================================
+# AUTHENTICATION ENDPOINTS
+# ============================================================================
+
+@app.route('/api/auth/signup', methods=['POST'])
+def signup():
+    """User registration"""
+    if supabase_client is None:
+        return jsonify({'error': 'Authentication not configured'}), 500
+
+    data = request.get_json()
+    email = data.get('email')
+    password = data.get('password')
+    name = data.get('name', '')
+
+    if not email or not password:
+        return jsonify({'error': 'Email and password required'}), 400
+
+    try:
+        # Sign up user
+        response = supabase_client.auth.sign_up({
+            'email': email,
+            'password': password,
+            'options': {
+                'data': {'name': name}
+            }
+        })
+
+        return jsonify({
+            'success': True,
+            'message': 'Account created successfully. Please check your email for verification.',
+            'user': {
+                'id': response.user.id,
+                'email': response.user.email
+            }
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Signup failed: {str(e)}'}), 400
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    """User login"""
+    if supabase_client is None:
+        return jsonify({'error': 'Authentication not configured'}), 500
+
+    data = request.get_json()
+    email = data.get('email')
+    password = data.get('password')
+
+    if not email or not password:
+        return jsonify({'error': 'Email and password required'}), 400
+
+    try:
+        # Sign in user
+        response = supabase_client.auth.sign_in_with_password({
+            'email': email,
+            'password': password
+        })
+
+        # Set session
+        session.permanent = True
+        session['user_id'] = response.user.id
+        session['user_email'] = response.user.email
+        session['access_token'] = response.session.access_token
+
+        # Set user ID in RAG system
+        if rag_orchestrator:
+            rag_orchestrator.set_user_id(response.user.id)
+
+        return jsonify({
+            'success': True,
+            'user': {
+                'id': response.user.id,
+                'email': response.user.email,
+                'name': response.user.user_metadata.get('name', '')
+            }
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Login failed: {str(e)}'}), 401
+
+
+@app.route('/api/auth/logout', methods=['POST'])
+@login_required
+def logout():
+    """User logout"""
+    try:
+        if supabase_client:
+            supabase_client.auth.sign_out()
+
+        session.clear()
+
+        return jsonify({'success': True, 'message': 'Logged out successfully'})
+
+    except Exception as e:
+        return jsonify({'error': f'Logout failed: {str(e)}'}), 500
+
+
+@app.route('/api/auth/user', methods=['GET'])
+@login_required
+def get_current_user():
+    """Get current user info"""
+    return jsonify({
+        'user': {
+            'id': session.get('user_id'),
+            'email': session.get('user_email')
+        }
+    })
+
+
+# ============================================================================
+# DOCUMENT & KNOWLEDGE BASE ENDPOINTS
+# ============================================================================
 
 @app.route('/')
 def index():
@@ -66,10 +238,11 @@ def index():
 
 
 @app.route('/upload', methods=['POST'])
+@login_required
 def upload_files():
     """Handle file uploads"""
     if rag_orchestrator is None:
-        return jsonify({'error': 'RAG system not initialized. Check GEMINI_API_KEY.'}), 500
+        return jsonify({'error': 'RAG system not initialized'}), 500
 
     if 'files[]' not in request.files:
         return jsonify({'error': 'No files provided'}), 400
@@ -96,7 +269,6 @@ def upload_files():
 
     # Create knowledge base
     try:
-        # Chunking configuration
         chunking_config = {
             'white_space_config': {
                 'max_tokens_per_chunk': int(request.form.get('max_tokens', 500)),
@@ -110,7 +282,6 @@ def upload_files():
             chunking_config=chunking_config
         )
 
-        # Store in session
         session['current_store'] = store_id
         session['store_name'] = store_name
 
@@ -127,10 +298,11 @@ def upload_files():
 
 
 @app.route('/query', methods=['POST'])
+@login_required
 def query():
-    """Handle user queries"""
+    """Handle user queries with memory integration"""
     if rag_orchestrator is None:
-        return jsonify({'error': 'RAG system not initialized. Check GEMINI_API_KEY.'}), 500
+        return jsonify({'error': 'RAG system not initialized'}), 500
 
     data = request.get_json()
     question = data.get('question', '').strip()
@@ -142,6 +314,7 @@ def query():
     store_name = data.get('store_name') or session.get('current_store')
     metadata_filter = data.get('metadata_filter')
     include_citations = data.get('include_citations', True)
+    user_id = session.get('user_id')
 
     if not store_name:
         return jsonify({'error': 'No knowledge base is active. Please upload files first.'}), 400
@@ -151,7 +324,8 @@ def query():
             question=question,
             store_name=store_name,
             metadata_filter=metadata_filter,
-            include_citations=include_citations
+            include_citations=include_citations,
+            user_id=user_id
         )
 
         return jsonify({
@@ -159,12 +333,242 @@ def query():
             'answer': result.get('text', ''),
             'query_type': result.get('query_type', 'GENERAL'),
             'citations': result.get('citations', []),
+            'memories_used': result.get('memories_used', 0),
+            'memory_enabled': result.get('memory_enabled', False),
             'timestamp': datetime.now().isoformat()
         })
 
     except Exception as e:
         return jsonify({'error': f'Error processing query: {str(e)}'}), 500
 
+
+# ============================================================================
+# MEMORY MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@app.route('/api/memory/search', methods=['POST'])
+@login_required
+def search_memories():
+    """Search user memories"""
+    if rag_orchestrator is None or not rag_orchestrator.memory_enabled:
+        return jsonify({'error': 'Memory system not available'}), 500
+
+    data = request.get_json()
+    query = data.get('query', '')
+    limit = data.get('limit', 10)
+    user_id = session.get('user_id')
+
+    try:
+        memories = rag_orchestrator.get_user_memories(user_id=user_id, limit=limit)
+
+        return jsonify({
+            'success': True,
+            'memories': memories,
+            'count': len(memories)
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Error searching memories: {str(e)}'}), 500
+
+
+@app.route('/api/memory/all', methods=['GET'])
+@login_required
+def get_all_memories():
+    """Get all memories for current user"""
+    if rag_orchestrator is None or not rag_orchestrator.memory_enabled:
+        return jsonify({'error': 'Memory system not available'}), 500
+
+    limit = request.args.get('limit', 50, type=int)
+    user_id = session.get('user_id')
+
+    try:
+        memories = rag_orchestrator.get_user_memories(user_id=user_id, limit=limit)
+
+        return jsonify({
+            'success': True,
+            'memories': memories,
+            'count': len(memories)
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Error retrieving memories: {str(e)}'}), 500
+
+
+@app.route('/api/memory/add', methods=['POST'])
+@login_required
+def add_memory():
+    """Manually add a memory/preference"""
+    if rag_orchestrator is None or not rag_orchestrator.memory_enabled:
+        return jsonify({'error': 'Memory system not available'}), 500
+
+    data = request.get_json()
+    preference = data.get('preference', '').strip()
+
+    if not preference:
+        return jsonify({'error': 'Preference is required'}), 400
+
+    user_id = session.get('user_id')
+
+    try:
+        success = rag_orchestrator.add_user_preference(preference, user_id=user_id)
+
+        if success:
+            return jsonify({
+                'success': True,
+                'message': 'Preference added successfully'
+            })
+        else:
+            return jsonify({'error': 'Failed to add preference'}), 500
+
+    except Exception as e:
+        return jsonify({'error': f'Error adding preference: {str(e)}'}), 500
+
+
+@app.route('/api/memory/clear', methods=['POST'])
+@login_required
+def clear_memories():
+    """Clear all memories for current user"""
+    if rag_orchestrator is None or not rag_orchestrator.memory_enabled:
+        return jsonify({'error': 'Memory system not available'}), 500
+
+    user_id = session.get('user_id')
+
+    try:
+        success = rag_orchestrator.clear_user_memories(user_id=user_id)
+
+        if success:
+            return jsonify({
+                'success': True,
+                'message': 'All memories cleared successfully'
+            })
+        else:
+            return jsonify({'error': 'Failed to clear memories'}), 500
+
+    except Exception as e:
+        return jsonify({'error': f'Error clearing memories: {str(e)}'}), 500
+
+
+# ============================================================================
+# MEMORY ANALYTICS ENDPOINTS
+# ============================================================================
+
+@app.route('/api/memory/analytics', methods=['GET'])
+@login_required
+def get_memory_analytics():
+    """Get memory analytics for current user"""
+    if rag_orchestrator is None or not rag_orchestrator.memory_enabled:
+        return jsonify({'error': 'Memory system not available'}), 500
+
+    user_id = session.get('user_id')
+
+    try:
+        # Get all memories
+        memories = rag_orchestrator.get_user_memories(user_id=user_id, limit=100)
+
+        # Analyze memories
+        total_memories = len(memories)
+
+        # Count by type (if metadata exists)
+        query_types = {}
+        timestamps = []
+
+        for memory in memories:
+            # Extract metadata if available
+            metadata = memory.get('metadata', {})
+
+            # Count query types
+            qtype = metadata.get('query_type', 'UNKNOWN')
+            query_types[qtype] = query_types.get(qtype, 0) + 1
+
+            # Collect timestamps
+            timestamp = metadata.get('timestamp')
+            if timestamp:
+                timestamps.append(timestamp)
+
+        # Memory activity over time
+        activity_by_day = {}
+        for ts in timestamps:
+            try:
+                date = ts.split(' ')[0]  # Extract date part
+                activity_by_day[date] = activity_by_day.get(date, 0) + 1
+            except:
+                pass
+
+        return jsonify({
+            'success': True,
+            'analytics': {
+                'total_memories': total_memories,
+                'query_type_distribution': query_types,
+                'activity_by_day': activity_by_day,
+                'recent_activity': len([t for t in timestamps if t])  # Non-empty timestamps
+            }
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Error generating analytics: {str(e)}'}), 500
+
+
+@app.route('/api/memory/export', methods=['GET'])
+@login_required
+def export_memories():
+    """Export memories as CSV"""
+    if rag_orchestrator is None or not rag_orchestrator.memory_enabled:
+        return jsonify({'error': 'Memory system not available'}), 500
+
+    user_id = session.get('user_id')
+    format_type = request.args.get('format', 'csv')
+
+    try:
+        memories = rag_orchestrator.get_user_memories(user_id=user_id, limit=1000)
+
+        if format_type == 'json':
+            # Export as JSON
+            output = io.BytesIO()
+            output.write(json.dumps(memories, indent=2).encode('utf-8'))
+            output.seek(0)
+
+            return send_file(
+                output,
+                mimetype='application/json',
+                as_attachment=True,
+                download_name=f'memories_{user_id}_{datetime.now().strftime("%Y%m%d")}.json'
+            )
+
+        else:
+            # Export as CSV
+            output = io.StringIO()
+            writer = csv.writer(output)
+
+            # Header
+            writer.writerow(['Memory', 'Type', 'Timestamp', 'Has Citations'])
+
+            # Data
+            for memory in memories:
+                metadata = memory.get('metadata', {})
+                writer.writerow([
+                    memory.get('memory', memory.get('text', str(memory))),
+                    metadata.get('query_type', 'N/A'),
+                    metadata.get('timestamp', 'N/A'),
+                    metadata.get('has_citations', False)
+                ])
+
+            output.seek(0)
+            output_bytes = io.BytesIO(output.getvalue().encode('utf-8'))
+
+            return send_file(
+                output_bytes,
+                mimetype='text/csv',
+                as_attachment=True,
+                download_name=f'memories_{user_id}_{datetime.now().strftime("%Y%m%d")}.csv'
+            )
+
+    except Exception as e:
+        return jsonify({'error': f'Error exporting memories: {str(e)}'}), 500
+
+
+# ============================================================================
+# SYSTEM ENDPOINTS
+# ============================================================================
 
 @app.route('/stats')
 def stats():
@@ -174,13 +578,19 @@ def stats():
 
     try:
         stats = rag_orchestrator.get_stats()
+
+        # Add session info
         stats['session_store'] = session.get('store_name', 'None')
+        stats['authenticated'] = 'user_id' in session
+
         return jsonify(stats)
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/clear-conversation', methods=['POST'])
+@login_required
 def clear_conversation():
     """Clear conversation history"""
     if rag_orchestrator is None:
@@ -189,6 +599,7 @@ def clear_conversation():
     try:
         rag_orchestrator.clear_conversation()
         return jsonify({'success': True, 'message': 'Conversation history cleared'})
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -203,6 +614,7 @@ def list_stores():
         stores = rag_orchestrator.file_manager.list_stores()
         store_list = [{'name': store.name, 'display_name': store.display_name} for store in stores]
         return jsonify({'stores': store_list})
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -213,6 +625,8 @@ def health():
     return jsonify({
         'status': 'healthy',
         'rag_initialized': rag_orchestrator is not None,
+        'memory_enabled': rag_orchestrator.memory_enabled if rag_orchestrator else False,
+        'auth_configured': supabase_client is not None,
         'timestamp': datetime.now().isoformat()
     })
 
@@ -224,15 +638,21 @@ def request_entity_too_large(error):
 
 
 if __name__ == '__main__':
-    # Initialize RAG system
-    if init_rag_system():
-        print("Starting Flask application with Agentic RAG system...")
-        app.run(debug=True, host='0.0.0.0', port=5000)
-    else:
+    # Initialize systems
+    auth_init = init_supabase()
+    rag_init = init_rag_system()
+
+    if not rag_init:
         print("\n" + "="*60)
         print("ERROR: Could not initialize RAG system")
-        print("Please set the GEMINI_API_KEY environment variable:")
-        print("  export GEMINI_API_KEY='your-api-key-here'")
+        print("Please set the GEMINI_API_KEY environment variable")
         print("="*60 + "\n")
-        print("Starting Flask application anyway (limited functionality)...")
-        app.run(debug=True, host='0.0.0.0', port=5000)
+
+    if not auth_init:
+        print("\n" + "="*60)
+        print("WARNING: Authentication not configured")
+        print("Set SUPABASE_URL and SUPABASE_KEY for multi-user support")
+        print("="*60 + "\n")
+
+    print("Starting Flask application...")
+    app.run(debug=True, host='0.0.0.0', port=5000)

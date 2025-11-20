@@ -8,6 +8,14 @@ mem0ai>=0.1.0
 # Web Framework
 Flask>=3.0.0
 werkzeug>=3.0.0
+Flask-CORS>=4.0.0
+
+# Authentication & Session Management
+supabase>=2.0.0
+PyJWT>=2.8.0
+
+# Data handling
+pandas>=2.0.0
 
 # Optional dependencies for enhanced functionality
 python-dotenv>=1.0.0
